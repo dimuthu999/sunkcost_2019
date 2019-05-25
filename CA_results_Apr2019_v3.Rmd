@@ -1,0 +1,945 @@
+---
+title: "Sunk Cost and House Price"
+author: "DR and VY"
+date: "March, 2019"
+output: 
+  html_document:
+    css: bodycss.css
+    toc: yes
+    number_section: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE,message = FALSE)
+```
+
+```{r}
+rm(list=ls())
+library(stargazer)
+library(plyr)
+library(lfe)
+library(zoo)
+library(scales)
+library(rdrobust)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+
+note =c("Fixed Effects: census tract, listing month, ownership cohort","Standard Errors clustered by census tract")
+output.type="text"
+printtable <- function(reg,column.labels,note,lines) {
+  stargazer(reg,type=output.type,no.space = TRUE,omit.stat = c("f","rsq","ser"),notes= note,column.labels = column.labels, dep.var.labels = "",dep.var.labels.include = FALSE,add.lines = lines)
+}
+
+
+
+
+zdata <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/zillow_ztrax_Mar2019_5.rds")
+zdata[,Selling_premium:=zdata$sales_price/zdata$adj_purch_price]
+zdata[,Renter_fraction:=zdata$renters/zdata$totalpopulation]
+zdata[,Purchase_price:=SalesPriceAmount_prev]
+zdata[,Listing_price:=listing_amount]
+zdata[,Selling_price:=sales_price]
+zdata[,Listing_premium:=list_premium]
+zdata[,Property_tax_last_year:=prop_tax_prev_year]
+zdata[,Property_tax_rate_last_year:=prop_tax_rate]
+
+# zdata <- rename(zdata,replace=c(
+#                               "SalesPriceAmount_prev"="Purchase_price",
+#                               "listing_amount"="Listing_price",
+#                               "sales_price"="Selling_price",
+#                               "list_premium"="Listing_premium",
+#                               "prop_tax_prev_year"="Property_tax_last_year",
+#                               "prop_tax_rate" = "Property_tax_rate_last_year"))
+
+zdata_reg <- zdata[zdata$ListingYear>2013 & zdata$Listing_premium<1.5 & zdata$Listing_premium>0.8 & zdata$ownership_years>=2 & zdata$house_age>0 ]
+zdata_reg[,ownership_cohort:=ntile(zdata_reg$ownership_years,10)]
+zdata_reg[,Time_on_market:=as.numeric(zdata_reg$sale_date)-as.numeric(zdata_reg$listed_date)+1]
+
+```
+
+
+
+```{r}
+zdata_reg <- data.table(mutate(zdata_reg,min_asmt=pmin(assesment_2007,assesment_2008,assesment_2009,assesment_2010,assesment_2011,assesment_2012,na.rm = TRUE)))
+zdata_reg[,affected_by_prop_8_2:=ifelse(zdata_reg$min_asmt>0 & !is.na(zdata_reg$min_asmt) & zdata_reg$PurchaseYear<2007 & zdata_reg$min_asmt<zdata_reg$Purchase_price,1,0)]
+
+zdata_reg[,zip_list_month:=paste(zdata_reg$zip,zdata_reg$ListingMonth)]
+zdata_reg[,tract_list_month:=paste(zdata_reg$GEOID,zdata_reg$ListingMonth)]
+zdata_reg[,zip_sale_month:=sapply(zdata_reg$sale_date,function(x) substr(x,1,7))]
+zdata_reg[,zip_sale_month:=paste(zdata_reg$zip,zdata_reg$zip_sale_month)]
+
+zdata_reg[,Tax_rate:=zdata_reg$prop_tax_rate]
+zdata_reg[,Ownership_years:=zdata_reg$ownership_years]
+zdata_reg[,Adj_purch_price:=zdata_reg$adj_purch_price]
+zdata_reg[,Bedrooms:=zdata_reg$beds]
+zdata_reg[,Bathrooms:=zdata_reg$baths]
+zdata_reg[,HPI_purchase:=zdata_reg$purchase_hpi]
+
+zdata_reg[,nominal_loss:=ifelse(zdata_reg$purchase_hpi>zdata_reg$listing_hpi,zdata_reg$Purchase_price-zdata_reg$Adj_purch_price,1)]
+zdata_reg[,nominal_gain:=ifelse(zdata_reg$purchase_hpi<zdata_reg$listing_hpi,zdata_reg$Adj_purch_price-zdata_reg$Purchase_price,1)]
+
+zdata_reg[,purchase_time_cat:=as.factor(ifelse(zdata_reg$PurchaseYear<2008,"<2008",ifelse(zdata_reg$PurchaseYear<2012,"2008-2011",">2011")))]
+
+zdata_reg[,discount:=(zdata_reg$listing_amount-zdata_reg$sales_price)/zdata_reg$listing_amount]
+
+zdata_reg[,zip_purch_year_list_year:=paste(zdata_reg$zip,zdata_reg$purchase_list_year)]
+zdata_reg[,county:=sapply(zdata_reg$GEOID,function(x) substr(x,1,5))]
+zdata_reg[,county_purch_year_list_year:=paste(zdata_reg$county,zdata_reg$purchase_list_year)]
+zdata_reg[,purchase_month_no:=as.numeric(format(zdata_reg$PurchaseMonth,"%m"))]
+
+```
+
+```{r}
+CA_all <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/CA_prev_transaction_merged_2.rds")
+CA_all[,House_age:=CA_all$Sale_year-CA_all$YearBuilt]
+CA_all[,nominal_loss:=ifelse(CA_all$HPI_purchase>CA_all$HPI_sale,CA_all$Purchase_price-CA_all$Adj_purch_price,1)]
+CA_all[,zip_sale_month:=paste(CA_all$zip,CA_all$Sale_month)]
+CA_all[,Sale_price:=CA_all$SalesPriceAmount_sale]
+```
+
+
+```{r}
+
+IL <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/IL_prev_transaction_merged.rds")
+AZ <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/AZ_prev_transaction_merged.rds")
+NY <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/NY_prev_transaction_merged.rds")
+OR <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/OR_prev_transaction_merged.rds")
+# NV <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/NV_prev_transaction_merged.rds")
+# OR <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/OR_prev_transaction_merged.rds")
+# FL <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/perv_transactions/FL_prev_transaction_merged.rds")
+
+prev_trans <- rbind(IL,AZ)
+prev_trans <- rbind(prev_trans,NY)
+prev_trans <- rbind(prev_trans,OR)
+# prev_trans <- rbind(prev_trans,FL)
+prev_trans[,House_age:=prev_trans$Sale_year-prev_trans$YearBuilt]
+prev_trans[,Sale_price:=prev_trans$SalesPriceAmount_sale]
+prev_trans[,State:=sapply(prev_trans$FIPS, function(x) substr(as.character(x),1,nchar(x)-3))]
+
+prev_trans[,zip_sale_month:=paste(prev_trans$zip,prev_trans$Sale_month)]
+
+prev_trans[,nominal_loss:=ifelse(prev_trans$HPI_purchase>prev_trans$HPI_sale,prev_trans$Purchase_price-prev_trans$Adj_purch_price,1)]
+
+rm(list=c("IL","AZ","NV","OR","FL","NY"))
+```
+
+```{r}
+# AZ <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/all_homes_prev/AZ_all_homes_prev.rds")
+CA <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/all_homes_prev/CA_all_homes_prev.rds")
+IL <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/all_homes_prev/IL_all_homes_prev.rds")
+NY <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/all_homes_prev/NY_all_homes_prev.rds")
+
+
+all_homes_prev <- rbind(CA,IL)
+# all_homes_prev <- rbind(all_homes_prev,IL)
+all_homes_prev <- rbind(all_homes_prev,NY)
+all_homes_prev[,Ownership_years:=2016-all_homes_prev$Purchase_year]
+all_homes_prev <- all_homes_prev[all_homes_prev$Ownership_years>2]
+
+all_homes_prev[,tax_rate_2014:=all_homes_prev$tax_2014/all_homes_prev$Adj_purch_price]
+all_homes_prev[,tax_rate_2015:=all_homes_prev$tax_2015/all_homes_prev$Adj_purch_price]
+all_homes_prev[,tax_rate_2016:=all_homes_prev$tax_2016/all_homes_prev$Adj_purch_price]
+all_homes_prev<-all_homes_prev[(all_homes_prev$tax_rate_2015>0 & all_homes_prev$tax_rate_2015<0.1) | (all_homes_prev$tax_rate_2016>0 & all_homes_prev$tax_rate_2016<0.1)| (all_homes_prev$tax_rate_2014>0 & all_homes_prev$tax_rate_2014<0.1)]
+
+all_homes_prev[,nominal_loss:=ifelse(all_homes_prev$HPI_purchase>all_homes_prev$HPI_asmt,all_homes_prev$SalesPriceAmount-all_homes_prev$Adj_purch_price,1)]
+
+all_homes_prev[,House_age:=2016-all_homes_prev$YearBuilt]
+
+# ownership_year_group <- data.frame(ownership_year_group=c("lt 5","lt 5","lt 5","6-10","6-10","6-10","6-10","6-10","11-15","11-15","11-15","11-15","11-15","16-20","16-20","16-20","16-20","16-20"),Ownership_years=3:20,stringsAsFactors = FALSE)
+# 
+# all_homes_prev <- merge(all_homes_prev,ownership_year_group,by="Ownership_years")
+
+rm(list=c("IL","AZ","NV","OR","FL","NY"))
+```
+
+
+# Descriptive Statistics: Complete Sample
+```{r}
+stargazer(zdata_reg[,c("Purchase_price","adj_purch_price","Listing_price","Listing_premium",
+                       "Selling_premium","Property_tax_last_year","Property_tax_rate_last_year",
+                       "affected_by_prop_8","purchase_hpi","hpi_inflation","ownership_years",
+                       "beds","baths","sqft","LotSizeSquareFeet","house_age","LTV_prev",
+                       "avg_school_rating","avg_school_distance","totalpopulation","medianage","medianhouseholdincome","Renter_fraction")],type=output.type,summary.stat = c("mean","sd","p25","median","p75","n"),digits = 4)
+```
+
+# Descriptive Statistics: Purchases before 2008
+```{r}
+stargazer(zdata_reg[zdata_reg$PurchaseYear<2008,c("Purchase_price","adj_purch_price","Listing_price","Listing_premium",
+                       "Selling_premium","Property_tax_last_year","Property_tax_rate_last_year",
+                       "affected_by_prop_8","purchase_hpi","hpi_inflation","ownership_years",
+                       "beds","baths","sqft","LotSizeSquareFeet","house_age","LTV_prev",
+                       "avg_school_rating","avg_school_distance","totalpopulation","medianage","medianhouseholdincome","Renter_fraction")],type=output.type,summary.stat = c("mean","sd","p25","median","p75","n"),digits = 4)
+```
+
+# Instrument Validation
+
+## California: Within zip code variation of property tax rate
+```{r}
+temp <- zdata_reg[zdata_reg$PurchaseYear<=2011]
+
+zip_tax_rate <- temp[,.(mean_tax_rate=mean(Property_tax_rate_last_year)),
+             by=list(zip)]
+
+temp <- merge(temp,zip_tax_rate,by=c("zip"))
+
+temp[,tax_variation:= (temp$Property_tax_rate_last_year-temp$mean_tax_rate)*100]
+
+q1<-qplot(temp$tax_variation,geom="histogram",xlab="Tax Rate - Mean Zip code Tax Rate (%)",ylab="Number of Listings",col=I("black"))+ theme_minimal()+xlim(-1,1)+scale_y_continuous(labels = comma)
+q1
+```
+
+## Effect of Years of ownership on Property tax rate (Figure)
+
+Sample: All homes in CA, IL, and NY for which purchase transaction details and property tax amount paid in 2016 (or 2014 for IL) are available. Intra-family transfers and forclosure sales were excluded.
+
+```{r}
+year_summary <- all_homes_prev[all_homes_prev$Adj_purch_price>100000 & all_homes_prev$Adj_purch_price<1500000,.(tax_rate_2016=median(tax_rate_2016,na.rm=TRUE),tax_rate_2015=median(tax_rate_2015,na.rm=TRUE),tax_rate_2014=median(tax_rate_2014,na.rm=TRUE),HPI=median(HPI_purchase)/50),by=list(State,Purchase_year)]
+
+year_summary[,median_tax:=ifelse(year_summary$State %in% c("CA","NY"),year_summary$tax_rate_2016,ifelse(year_summary$State=="AZ",year_summary$tax_rate_2015,ifelse(year_summary$State %in% c("IL"),year_summary$tax_rate_2014,NA)))]
+
+ggplot()+geom_line(data=year_summary[!year_summary$State %in% c("AZ")],aes(x=Purchase_year,y=median_tax*100,linetype=factor(State)),size=1)+theme_minimal()+theme(legend.position="none")+
+  geom_rect(data=data.frame(xmin=1996,xmax=2007,ymin=0,ymax=2.75),aes(xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax),fill="darkgreen",alpha=0.2)+
+  geom_rect(data=data.frame(xmin=2009,xmax=2012,ymin=0,ymax=2.75),aes(xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax),fill="darkred",alpha=0.1)+xlab("Year of purchase")+ylab("Tax rate (%)")+annotate("text",label="CA",x=2013.2,y=1)+annotate("text",label="IL",x=2013.2,y=2.05)+annotate("text",label="NY",x=2013.2,y=2.2)+scale_x_continuous(breaks = 1996:2013) #+geom_line(data=year_summary[year_summary$State=="CA"],aes(x=Purchase_year,y=HPI),color="gray")+
+```
+
+
+## Effect of Years of ownership on Property tax rate (Regression)
+
+Sample: All homes in CA, IL, and NY for which purchase transaction details and property tax amount paid in 2016 (or 2014 for IL) are available <b> and purchase year is less than 2008</b>. Intra-family transfers and forclosure sales were excluded.
+
+```{r}
+
+all_homes_prev[,tax_rate:=ifelse(all_homes_prev$State %in% c("CA","NY"),all_homes_prev$tax_rate_2016,ifelse(all_homes_prev$State=="AZ",all_homes_prev$tax_rate_2015,ifelse(all_homes_prev$State %in% c("IL"),all_homes_prev$tax_rate_2014,NA)))]
+
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("I(tax_rate*100)~Ownership_years+log(Adj_purch_price)+log(nominal_loss)+Bedrooms+Bathrooms+log(House_age)|zip|0|zip")),data=all_homes_prev[all_homes_prev$State=="CA" & all_homes_prev$Purchase_year<2008 & all_homes_prev$House_age>0])
+regs[[2]] <- felm(as.formula(paste("I(tax_rate*100)~Ownership_years+log(Adj_purch_price)+log(nominal_loss)+Bedrooms+Bathrooms+log(House_age)|zip|0|zip")),data=all_homes_prev[all_homes_prev$State=="IL" & all_homes_prev$Purchase_year<2008])
+regs[[3]] <- felm(as.formula(paste("I(tax_rate*100)~Ownership_years+log(Adj_purch_price)+log(nominal_loss)+log(House_age)|zip|0|zip")),data=all_homes_prev[all_homes_prev$State=="NY" & all_homes_prev$Purchase_year<2008 ])
+
+printtable(regs,column.labels = c("CA","IL","NY"),note="",
+           lines=list(c("FE:","Zip","Zip","Zip"),c("Cluster:","Zip","Zip","Zip")))
+
+```
+
+
+## First Stage: Effect of Years of Ownership on Tax Rate
+Using zillow sample.
+
+```{r}
+regs <- list()
+
+controls = "log(adj_purch_price)+log(nominal_loss)+beds+baths+log(sqft)+avg_school_rating+avg_school_distance+walk_score+log(house_age)+log(LotSizeSquareFeet)+LTV_prev"
+fe = "|zip_list_month|"
+cluster = "|zip"
+instruments = "ownership_years" #
+endo_var = "Property_tax_rate_last_year"
+
+
+
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("I(prop_tax_rate*100)~ownership_years+",controls,fe,"0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseYear<2008 ])
+regs[[2]] <- felm(as.formula(paste("I(prop_tax_rate*100)~ownership_years+",controls,"+medianage+log(medianhouseholdincome)+Renter_fraction",fe,"0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseYear<2008 ])
+regs[[3]] <- felm(as.formula(paste("I(prop_tax_rate*100)~ownership_years+",controls,"|tract_list_month|","0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseYear<2008 ])
+# regs[[2]] <- felm(as.formula(paste("prop_tax_rate~ownership_years+",controls,fe,"0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseYear>2008 & zdata_reg$PurchaseYear<2013])
+# regs[[3]] <- felm(as.formula(paste("prop_tax_rate~ownership_years+",controls,fe,"0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseYear >2011])
+# regs[[4]] <- felm(as.formula(paste("prop_tax_rate~ownership_years*purchase_time_cat+",controls,fe,"0",cluster,sep="")),data=zdata_reg)
+
+printtable(regs,column.labels = c("1996-2007", "1996-2007","1996-2007","All"),note="",
+           lines=list(c("FE:","Zip x Month","Zip x Month","Tract x Month","Zip x Sale Month"),c("Cluster:","Zip","Zip","Zip","Zip")))
+
+```
+
+## Direct impact of Z (Years of Ownership) on Y (List Price): Zillow Sample
+
+For the homes purchased between 2009 and 2012, there is no variation in the property tax rate in 2016. Therefore column (2) captures the direct impact of 'years of ownership' on listing price.
+
+```{r}
+regs <- list()
+
+controls = "log(adj_purch_price)+log(nominal_loss)+beds+baths+sqft+avg_school_rating+avg_school_distance+walk_score+log(house_age)+log(LotSizeSquareFeet)+LTV_prev"
+fe = "|zip_list_month|"
+cluster = "|zip"
+instruments = "ownership_years" #
+endo_var = "Property_tax_rate_last_year"
+
+
+
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("log(Listing_price)~ownership_years+",controls,fe,"0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseYear<2007 ])
+regs[[2]] <- felm(as.formula(paste("log(Listing_price)~ownership_years+",controls,fe,"0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseMonth>="2009-04-01" & zdata_reg$PurchaseMonth<="2012-09-01"])
+# regs[[3]] <- felm(as.formula(paste("log(Listing_price)~ownership_years+",controls,fe,"0",cluster,sep="")),data=zdata_reg[zdata_reg$PurchaseYear>2011])
+
+printtable(regs,column.labels = c("1996-2007", "2009-2012"),note="",
+           lines=list(c("FE:","Zip x Month","Zip x Month","Zip x Month","Zip x Sale Month"),c("Cluster:","Zip","Zip","Zip","Zip")))
+
+```
+
+
+
+## Direct impact of Z (Years of Ownership) on Y (Quality): ZTRAX Data
+
+This table is based on ZTRAX data. Samples consists of all homes sold in 2015 and 2016 and purchased before 2008. Sample is restricted to the homes for which both the sale details and purchase details are available. Intra-family transfers and foreclosure sales were excluded. If 'years of ownership' has a negative direct impact on the quality of the home we should see negative and significant coefficients for IL and NY. FL and TX were exceluded due to property tax system in FL is similar to CA and unavailability of transaction prices respectively.
+
+```{r}
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("log(SalesPriceAmount_sale)~Ownership_years+","log(Adj_purch_price)+log(nominal_loss)+Bedrooms+Bathrooms+log(House_age)+BuildingAreaSqFt","|zip_sale_month|","0","|zip",sep="")),data=CA_all[CA_all$Purchase_year>2008 &  CA_all$Purchase_year<2013 & CA_all$Sale_year>2015 & CA_all$House_age>2 ])
+regs[[2]] <- felm(as.formula(paste("log(Sale_price)~Ownership_years+","log(Adj_purch_price)+log(nominal_loss)+Bedrooms+Bathrooms+log(House_age)+BuildingAreaSqFt","|zip_sale_month|","0","|zip",sep="")),data=prev_trans[prev_trans$State %in% c("17") & prev_trans$Purchase_year<2008 & prev_trans$Sale_year>2014 ])
+regs[[3]] <- felm(as.formula(paste("log(Sale_price)~Ownership_years+","log(Adj_purch_price)+log(nominal_loss)+Bedrooms+Bathrooms+log(House_age)+BuildingAreaSqFt","|zip_sale_month|","0","|zip",sep="")),data=prev_trans[prev_trans$State=="36" & prev_trans$Purchase_year<2008 & prev_trans$Sale_year>2014 & prev_trans$House_age>0 ])
+
+
+printtable(regs,column.labels = c("CA","IL","NY"),note="",
+           lines=list(c("FE:","Zip x Month","Zip x Month","Zip x Month","Zip x Sale Month"),c("Cluster:","Zip","Zip","Zip","Zip")))
+```
+
+
+
+# Effect on Listing price (Sample: Homes purchased before 2008)
+
+```{r}
+
+zd <- zdata_reg[zdata_reg$PurchaseYear<2008]
+
+controls = "log(adj_purch_price)+log(nominal_loss)+log(nominal_gain)+beds+baths+sqft+avg_school_rating+avg_school_distance+walk_score+log(house_age)+log(LotSizeSquareFeet)+LTV_prev"
+fe = "|zip_list_month|"
+cluster = "|zip"
+instruments = "ownership_years" #
+endo_var = "Property_tax_rate_last_year"
+
+
+
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("log(Listing_price)~Property_tax_rate_last_year+",controls,fe,"0",cluster,sep="")),data=zd)
+regs[[2]] <- felm(as.formula(paste("log(Listing_price)~",controls,fe,"(",endo_var,"~",instruments,")",cluster,sep="")),data=zd)
+# regs[[3]] <- felm(as.formula(paste("log(Listing_price)~",controls,fe,"(",endo_var,"~",instruments,")",cluster,sep="")),data=zd)
+# regs[[3]] <- felm(as.formula(paste("log(Listing_price)~",controls,"|zip_list_month+ownership_cohort|","(",endo_var,"~",instruments,")",cluster,sep="")),data=zdata_reg)
+regs[[3]] <- felm(as.formula(paste("log(Listing_price)~",controls,"+medianage+log(medianhouseholdincome)+Renter_fraction|zip_list_month|","(",endo_var,"~",instruments,")","|zip",sep="")),data=zd)
+regs[[4]] <- felm(as.formula(paste("log(Listing_price)~",controls,"|tract_list_month|","(",endo_var,"~",instruments,")","|GEOID",sep="")),data=zd)
+# regs[[5]] <- felm(as.formula(paste("log(Listing_price)~",controls,"|zip_purch_year_list_year|","(",endo_var,"~purchase_month_no)","|zip",sep="")),data=zd)
+# regs[[4]] <- felm(as.formula(paste("log(Listing_price)~",controls,"|zip_list_month+GEOID|","(",endo_var,"~",instruments,")","|zip",sep="")),data=zdata_reg)
+
+
+condf <- list(
+  c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2),round(condfstat(regs[[3]])[[1]],2),round(condfstat(regs[[4]])[[1]],2)),
+  c("Fixed Effects","Zip X Month","Zip x Month","Zip X Month","Tract X Month"),
+  c("Cluster","Zip","Zip","zip","Tract")
+  )
+printtable(regs,column.labels = c("OLS","IV","IV","IV"),note="",lines=condf)
+
+ols_formula <- as.formula(paste("log(Listing_price)~Property_tax_rate_last_year+",controls,fe,"0",cluster,sep=""))
+iv_formula <- as.formula(paste("log(Listing_price)~",controls,fe,"(",endo_var,"~",instruments,")",cluster,sep=""))
+note =c("Fixed Effects: Zip X Month, SE Clustered by Zip")
+
+```
+
+# Effect on Listing price: Variation by Expected Loss
+```{r}
+
+
+regs <- list()
+regs[[1]] <- felm(ols_formula,data=zd[zd$purchase_hpi>zd$listing_hpi])
+regs[[2]] <- felm(ols_formula,data=zd[zd$purchase_hpi<=zd$listing_hpi])
+regs[[3]] <- felm(iv_formula,data=zd[zd$purchase_hpi>zd$listing_hpi])
+regs[[4]] <- felm(iv_formula,data=zd[zd$purchase_hpi<=zd$listing_hpi])
+regs[[5]] <- felm(iv_formula,data=zd[zd$affected_by_prop_8==1])
+regs[[6]] <- felm(iv_formula,data=zd[zd$affected_by_prop_8==0])
+
+condf <- list(
+  c("Cond. F. Stat","","",round(condfstat(regs[[3]])[[1]],2),round(condfstat(regs[[4]])[[1]],2),round(condfstat(regs[[5]])[[1]],2),round(condfstat(regs[[6]])[[1]],2)))
+
+printtable(regs,column.labels = c("OLS-HPIp>HPIl","OLS-HPIp<HPIl","IV-HPIp>HPIl","IV-HPIp<HPIl","IV-Prop 8 = 1","IV-Prop 8 = 0"),note=note,lines=condf)
+```
+
+
+
+# Effect on Listing price: Variation by Property Price Category
+```{r}
+regs <- list()
+regs[[1]] <- felm(ols_formula,data=zd[zd$Listing_price<zd$listing_q2])
+regs[[2]] <- felm(iv_formula,data=zd[zd$Listing_price<zd$listing_q2])
+regs[[3]] <- felm(ols_formula,data=zd[zd$Listing_price>zd$listing_q2])
+regs[[4]] <- felm(iv_formula,data=zd[zd$Listing_price>zd$listing_q2])
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)," ",round(condfstat(regs[[4]])[[1]],2)))
+
+printtable(regs,column.labels = c("Low Value (OLS)","Low Value (IV)","High Value (OLS)","High Value (IV)"),note=note,lines=condf)
+```
+
+# Effect on Listing price: Variation by Cold and Hot Markets
+Cold: Last 3 year house price growth less than median <br/>
+Hot: Last 3 year house price growth greater than median
+```{r}
+  zhvi <- read.csv(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/Zip_Zhvi_AllHomes.csv",stringsAsFactors = FALSE)
+  zhvi <- zhvi[zhvi$State %in% c("CA"),]
+  zhvi[,c("RegionID","City","State","Metro","CountyName","SizeRank")] <- NULL
+  zhvi <- melt(zhvi,id.vars = c("RegionName"))
+  zhvi['month'] <- sapply(zhvi$variable,function(x) as.Date(paste(gsub("\\.","-",substr(x,2,8)),"-01",sep="")))
+  zhvi$month <- as.Date(zhvi$month,origin = "1970-01-01")
+  zhvi$variable <- NULL
+  names(zhvi) <- c("zip","HPI","month")
+  zhvi['purch_month_no']<-as.numeric(format(zhvi$month,"%m"))
+  zhvi <- zhvi[zhvi$purch_month_no==1,]
+  zhvi['year'] <- as.numeric(format(zhvi$month,"%Y"))
+  zhvi[,c("month","purch_month_no")] <- NULL
+  
+  zhvi2 <- zhvi
+  zhvi2$year <- zhvi2$year+3
+  names(zhvi2) <- c("zip","HPI_3","year")
+  
+  zhvi <-merge(zhvi,zhvi2,by=c("zip","year"))
+  zhvi['HPI_growth'] <- zhvi$HPI/zhvi$HPI_3-1
+  zhvi[,c("HPI","HPI_3")] <- NULL
+  names(zhvi) <- c("zip","ListingYear","HPI_growth")
+  
+zd <- merge(zd,zhvi,by=c("zip","ListingYear"),all.x = TRUE)
+median_HPI_gr <- median(zhvi[zhvi$ListingYear==2016,]$HPI_growth,na.rm = TRUE)
+low_zip <-zhvi[zhvi$HPI_growth<median_HPI_gr & zhvi$ListingYear==2016,]$zip
+
+zd[,low_zip:=ifelse(zd$zip %in% low_zip,1,0)]
+    
+regs <- list()
+regs[[1]] <- felm(ols_formula,data=zd[zd$zip %in% low_zip])
+regs[[2]] <- felm(iv_formula,data=zd[zd$zip %in% low_zip])
+regs[[3]] <- felm(ols_formula,data=zd[!zd$zip %in% low_zip])
+regs[[4]] <- felm(iv_formula,data=zd[!zd$zip %in% low_zip])
+
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)," ",round(condfstat(regs[[4]])[[1]],2)))
+
+printtable(regs,column.labels = c("Cold (OLS)","Cold (IV)","Hot (OLS)","Hot (IV)"),note=note,lines=condf)
+```
+
+# Effect on Listing price: Variation by Market Activity
+```{r}
+regs <- list()
+regs[[1]] <- felm(ols_formula,data=zd[zd$low_activiy==1])
+regs[[2]] <- felm(iv_formula,data=zd[zd$low_activiy==1])
+regs[[3]] <- felm(ols_formula,data=zd[zd$low_activiy==0])
+regs[[4]] <- felm(iv_formula,data=zd[zd$low_activiy==0])
+
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)," ",round(condfstat(regs[[4]])[[1]],2)))
+
+
+printtable(regs,column.labels = c("Low Activity (OLS)","Low Activity (IV)","High Activity (OLS)","High Activity (IV)"),note=note,lines=condf)
+```
+
+# Effect on Listing price: Variation by Loan-to-Value Ratio
+```{r}
+regs <- list()
+regs[[1]] <- felm(ols_formula,data=zd[zd$LTV_prev<0.7])
+regs[[2]] <- felm(iv_formula,data=zd[zd$LTV_prev<0.7])
+regs[[3]] <- felm(ols_formula,data=zd[zd$LTV_prev>=0.7])
+regs[[4]] <- felm(iv_formula,data=zd[zd$LTV_prev>=0.7])
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)," ",round(condfstat(regs[[4]])[[1]],2)))
+
+
+printtable(regs,column.labels = c("LTV<.7 (OLS)","LTV<.7 (IV)","LTV>.7 (OLS)","LTV>.7 (IV)"),note=note,lines=condf)
+```
+
+# Effect on Listing price: Variation by Census tract median age
+```{r}
+
+temp <- zd[!duplicated(zd$GEOID)]
+median_age <- median(temp$medianage,na.rm = TRUE)
+
+regs <- list()
+regs[[1]] <- felm(ols_formula,data=zd[zd$medianage<median_age])
+regs[[2]] <- felm(iv_formula,data=zd[zd$medianage<median_age])
+regs[[3]] <- felm(ols_formula,data=zd[zd$medianage>median_age])
+regs[[4]] <- felm(iv_formula,data=zd[zd$medianage>median_age])
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)," ",round(condfstat(regs[[4]])[[1]],2)))
+
+printtable(regs,column.labels = c("Low Age (OLS)","Low Age (IV)","High Age (OLS)","High Age (IV)"),note=note,lines=condf)
+```
+
+# Effect on Listing price: Variation by Census tract median household income
+```{r}
+
+temp <- zd[!duplicated(zd$GEOID)]
+medianhouseholdincome <- median(temp$medianhouseholdincome,na.rm = TRUE)
+
+regs <- list()
+regs[[1]] <- felm(ols_formula,data=zd[zd$medianhouseholdincome<67250])
+regs[[2]] <- felm(iv_formula,data=zd[zd$medianhouseholdincome<67250])
+regs[[3]] <- felm(ols_formula,data=zd[zd$medianhouseholdincome>67250])
+regs[[4]] <- felm(iv_formula,data=zd[zd$medianhouseholdincome>67250])
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)," ",round(condfstat(regs[[4]])[[1]],2)))
+
+printtable(regs,column.labels = c("Low Income (OLS)","Low Income (IV)","High Income (OLS)","High Income (IV)"),note=note,lines=condf)
+```
+
+
+## Save stata
+```{r}
+library(haven)
+
+write_dta(zd[,c("zip","adj_purch_price","nominal_loss","beds","baths","sqft","avg_school_rating","avg_school_distance",
+                "house_age","LotSizeSquareFeet","LTV_prev","zip_list_month","ownership_years","Property_tax_rate_last_year",
+                "listing_hpi","purchase_hpi","medianhouseholdincome","medianage","Listing_price","listing_q2",
+                "low_activiy","affected_by_prop_8")],"C:/Users/dnratnadiwakara/Documents/sunkcost_2019/stata_data.dta")
+
+
+```
+
+# Transaction Outcome
+
+## Effect of property tax rate on Transaction outcome (Zillow Sample)
+```{r}
+controls = "log(adj_purch_price)+log(nominal_loss)+log(nominal_gain)+beds+baths+sqft+avg_school_rating+avg_school_distance+walk_score+log(house_age)+log(LotSizeSquareFeet)+LTV_prev"
+fe = "|zip_list_month|"
+cluster = "|zip"
+instruments = "ownership_years" #
+endo_var = "Property_tax_rate_last_year"
+
+
+
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("log(sales_price)~Property_tax_rate_last_year+",controls,fe,"0",cluster,sep="")),data=zd)
+regs[[2]] <- felm(as.formula(paste("log(sales_price)~",controls,fe,"(",endo_var,"~",instruments,")",cluster,sep="")),data=zd)
+regs[[3]] <- felm(as.formula(paste("log(Time_on_market)~Property_tax_rate_last_year+",controls,fe,"0",cluster,sep="")),data=zd)
+regs[[4]] <- felm(as.formula(paste("log(Time_on_market)~",controls,fe,"(",endo_var,"~",instruments,")",cluster,sep="")),data=zd)
+regs[[5]] <- felm(as.formula(paste("discount~Property_tax_rate_last_year+",controls,fe,"0",cluster,sep="")),data=zd[zd$discount<0.2 & zd$discount>(-0.2)])
+regs[[6]] <- felm(as.formula(paste("discount~",controls,fe,"(",endo_var,"~",instruments,")",cluster,sep="")),data=zd[zd$discount<0.1 & zd$discount>(0)])
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)," ",round(condfstat(regs[[4]])[[1]],2)))
+
+printtable(regs,column.labels = c("OLS (Sale Price)","IV (Sale Price)","OLS (Time)","IV (Time)"),note=note,lines=condf)
+
+```
+
+
+## Effect of property tax rate on Log(Sale Price) (ZTRAX Data)
+
+Sample: Homes purchased before 2008 and at least two years of ownership. Both sales transactions details and purchase transaction details should be available to be included in the sample. Intra-family transfers and foreclosure sales were excluded.
+
+```{r}
+temp<-CA_all[CA_all$Purchase_year<2008 & CA_all$Sale_premium<1.5 & CA_all$Sale_premium>0.5 & CA_all$Tax_rate>0.0001 & CA_all$Tax_rate<0.025 & CA_all$House_age>0 & CA_all$Ownership_years>2]
+
+controls = "log(Adj_purch_price)+log(nominal_loss)+Bedrooms+Bathrooms+BuildingAreaSqFt+log(House_age)"
+fe = "|zip_sale_month|"
+cluster = "|zip"
+instruments = "Ownership_years" #
+endo_var = "Tax_rate"
+
+
+
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("log(SalesPriceAmount_sale)~Tax_rate+",controls,fe,"0",cluster,sep="")),data=temp)
+regs[[2]] <- felm(as.formula(paste("log(SalesPriceAmount_sale)~",controls,fe,"(",endo_var,"~",instruments,")",cluster,sep="")),data=temp)
+
+condf <- list(c("Cond. F. Stat","",round(condfstat(regs[[2]])[[1]],2)))
+
+printtable(regs,column.labels = c("OLS (Sale Price)","IV (Sale Price)","OLS (Time)","IV (Time)"),note=note,lines=condf)
+
+
+
+```
+
+
+
+# Using June Cutoff for assessment of new purchases
+
+## 2016 assesssment of homes purchased in 2015
+
+Assessment value of properties purchased after June 1st in a given year is reset to the purchase price in the subsequent year. Depending on whether the buyer purchased the home just before the June 1st or just after, there is a small difference in the property tax paid in subsequent years, all else equal.
+
+```{r}
+rdd_tax <- readRDS("C:/Users/dnratnadiwakara/Documents/sunkcost_2019/asmt_tax_2016_CA.rds")
+rdd_tax[,x:=as.numeric(rdd_tax$DocumentDate)]
+rdd_tax[,purch_week:=as.numeric(strftime(rdd_tax$DocumentDate,format="%V"))-19]
+
+# t <- rdd_tax[sample(1:nrow(rdd_tax),size = 20000),]
+rdd_tax <- rdd_tax[rdd_tax$asmt_sales>=1]
+rdd_tax <- rdd_tax[rdd_tax$asmt_sales>=0.9 & rdd_tax$asmt_sales<1.02 & rdd_tax$purch_week<30 & rdd_tax$tax_sales>0]
+
+rdd_tax <- rdd_tax[,.(asmt_sales=mean(asmt_sales)),by=list(purch_week)]
+# rdplot(rdd_tax$asmt_sales,rdd_tax$purch_week,p=1,c=20)
+
+ggplot(rdd_tax,aes(x=purch_week,y=asmt_sales)) + geom_point() + 
+  xlab("Purchase week (Weeks since June 01 2015)")+
+  ylab("2016 Asmt. Value/2015 Purchase Price")+
+  theme_minimal()+
+  geom_vline(xintercept = 0)
+```
+
+## Discoutinuity around June 01 (RD Plots)
+
+Sample is restricted to properties purchased in 2009 to 2012. During this period house prices were stable and there was no upward or downward trend around the cutoff. Therefore if identical properties were purchased just before and just after June 01, buyer would have paid the same price.
+
+Top 3 panels of the following plot confirms that there was no discontinuity around the cutoff in purchase prices, home area, or the month the homes were subsequently listed for sale.
+
+Bottom 3 panels show that, if the buyer puchased the home after June 01 in a given year<br/>
+* Property taxes paid just before listing is lower 
+* List the home at a slightly lower price
+* Eventually sells at a slightly lower price
+
+<b>All plots absorb $zipcode \times purchaseyear \times listyear$ fixed effects. When indicated by a *, $log(Adj purch price)$ was also used as an additional control.</b>
+
+```{r}
+temp <- zdata_reg[zdata_reg$PurchaseYear %in% 2009:2012 & zdata_reg$ownership_years>2]
+temp[,purch_month_no:=as.numeric(format(temp$PurchaseMonth,"%m"))]
+temp[,post:=ifelse(temp$purchase_month_no>=6,1,0)]
+temp[,sale_month_no:=as.numeric(format(temp$sale_date,"%m"))]
+```
+
+
+```{r}
+t(temp[,.(Purchase_price=mean(Purchase_price),beds=mean(beds,na.rm=TRUE),baths=mean(baths,na.rm=TRUE),sqft=mean(sqft,na.rm=TRUE),house_age=mean(house_age),LTV_prev=mean(LTV_prev,na.rm=TRUE),sale_month_no=mean(sale_month_no,na.rm=TRUE),n=length(Purchase_price),tax_rate=mean(prop_tax_prev_year,na.rm=TRUE),PurchaseYear=mean(PurchaseYear,na.rm=TRUE),ListingYear=mean(ListingYear,na.rm=TRUE)),by=list(post)])
+```
+
+```{r}
+t(temp[,.(Purchase_price=sd(Purchase_price),beds=sd(beds,na.rm=TRUE),baths=sd(baths,na.rm=TRUE),sqft=sd(sqft,na.rm=TRUE),house_age=sd(house_age),LTV_prev=sd(LTV_prev,na.rm=TRUE),sale_month_no=sd(sale_month_no,na.rm=TRUE),n=length(Purchase_price),tax_rate=sd(prop_tax_prev_year,na.rm=TRUE),PurchaseYear=sd(PurchaseYear,na.rm=TRUE),ListingYear=sd(ListingYear,na.rm=TRUE)),by=list(post)])
+```
+
+
+```{r}
+lapply(temp[,c("Purchase_price","beds","baths","sqft","house_age","LTV_prev","sale_month_no","PurchaseYear","ListingYear")],function(x) t.test(x~temp$post,var.equal=TRUE))
+```
+
+
+```{r}
+# temp <- zdata[zdata$ListingYear>2014 & zdata$Listing_premium>0.8 & zdata$Listing_premium<1.2 & zdata$ownership_years>=4 &  zdata$ownership_years<=118 & zdata$house_age>0  & zdata$PurchaseYear<2008]
+
+
+temp[,sale_month_no:=as.numeric(format(temp$sale_date,"%m"))]
+# temp = temp[temp$purch_month_no %in% 1:10]
+temp <- temp[!is.na(temp$adj_purch_price) & !is.na(temp$GEOID)]
+temp[,zip_purch_list:=paste(temp$zip,temp$purchase_list_year)]
+
+adj_proptax <- felm(Property_tax_rate_last_year~log(adj_purch_price)|zip_purch_list,data=temp)
+adj_proptax_resid <- data.frame(adj_proptax$residuals)
+names(adj_proptax_resid) <- c("adj_proptax_resid")
+
+adj_list <- felm(log(Listing_price)~log(adj_purch_price)|zip_purch_list,data=temp)
+adj_list_resid <- data.frame(adj_list$residuals)
+names(adj_list_resid) <- c("adj_list_resid")
+
+adj_sale <- felm(log(Selling_price)~log(adj_purch_price)|zip_purch_list,data=temp)
+adj_sale_resid <- data.frame(adj_sale$residuals)
+names(adj_sale_resid) <- c("adj_sale_resid")
+
+adj_purch <- felm(log(Purchase_price)~0|zip_purch_list,data=temp)
+adj_purch_resid <- data.frame(adj_purch$residuals)
+names(adj_purch_resid) <- c("adj_purch_resid")
+
+adj_est <- felm(sale_month_no~0|zip_purch_list,data=temp)
+adj_est_resid <- data.frame(adj_est$residuals)
+names(adj_est_resid) <- c("adj_est_resid")
+
+adj_sqft <- felm(sqft~0|zip_purch_list,data=temp)
+adj_sqft_resid <- data.frame(adj_sqft$residuals)
+names(adj_sqft_resid) <- c("adj_sqft_resid")
+
+temp <- cbind(temp,adj_proptax_resid)
+temp <- cbind(temp,adj_list_resid)
+temp <- cbind(temp,adj_sale_resid)
+temp <- cbind(temp,adj_purch_resid)
+temp <- cbind(temp,adj_est_resid)
+temp <- cbind(temp,adj_sqft_resid)
+
+temp[,DocumentDate_prev:=as.Date(temp$DocumentDate_prev,origin = "1970-01-01")]
+temp[,purch_week:=as.numeric(strftime(temp$DocumentDate_prev,format="%V"))-20]
+temp<-temp[temp$purch_week<31]
+
+poly =0
+br=0
+# temp_1 <- temp[,.(adj_list_resid=mean(adj_list_resid)),by=list(purch_week)]
+par(mfrow=c(2,2))
+rdplot(temp$adj_purch_resid,temp$purch_week,p=poly,c=br,x.label = "",title = "log(Purchase price)",y.label = "")
+#rdplot(temp$adj_sqft_resid,temp$purch_week,p=poly,c=br,x.label = "",title = "House area",y.label = "")
+#rdplot(temp$adj_est_resid,temp$purch_week,p=poly,c=br,x.label = "",title = "Sale month",y.label = "")
+rdplot(temp$adj_proptax_resid,temp$purch_week,p=poly,c=br,x.label = "",title = "Effective tax rate*",y.label = "")
+rdplot(temp$adj_list_resid,temp$purch_week,p=poly,c=br,x.label = "Purchased week (June 01 = 0)",title = "log(Listing price)*",y.label = "")
+rdplot(temp$adj_sale_resid,temp$purch_week,p=poly,c=br,x.label = "Purchased week (June 01 = 0)",title = "log(Selling price)*",y.label = "")
+
+
+```
+
+## Discoutinuity around June 01 (RD Regression)
+```{r}
+temp <- zdata_reg[zdata_reg$PurchaseYear %in% 2009:2012 & zdata_reg$ownership_years>2]
+temp[,purch_month_no:=as.numeric(format(temp$PurchaseMonth,"%m"))]
+temp[,sale_month_no:=as.numeric(format(temp$sale_date,"%m"))]
+temp <- temp[!is.na(temp$adj_purch_price) & !is.na(temp$GEOID)]
+temp[,zip_purch_list:=paste(temp$zip,temp$purchase_list_year)]
+temp[,DocumentDate_prev:=as.Date(temp$DocumentDate_prev,origin = "1970-01-01")]
+temp[,purch_week:=as.numeric(strftime(temp$DocumentDate_prev,format="%V"))-20]
+temp<-temp[temp$purch_week<31]
+temp[,purchase_after_june01:=ifelse(temp$purch_week>=0,1,0)]
+
+controls = "+beds+baths+sqft+avg_school_rating+avg_school_distance+walk_score+log(house_age)+log(LotSizeSquareFeet)+LTV_prev|zip_purch_list|0|zip"
+note =c("Fixed Effects: Zip X Purchased Year x Listed Year, SE Clustered by Zip")
+
+regs <- list()
+regs[[1]] <- felm(as.formula(paste("I(Property_tax_rate_last_year*100)~purchase_after_june01+log(adj_purch_price)",controls,sep="")),data=temp)
+regs[[2]] <- felm(as.formula(paste("log(Listing_price)~purchase_after_june01+log(adj_purch_price)",controls,sep="")),data=temp)
+regs[[3]] <- felm(as.formula(paste("log(Selling_price)~purchase_after_june01+log(adj_purch_price)",controls,sep="")),data=temp)
+regs[[4]] <- felm(as.formula(paste("log(Purchase_price)~purchase_after_june01+log(HPI_purchase)",controls,sep="")),data=temp)
+regs[[5]] <- felm(as.formula(paste("sale_month_no~purchase_after_june01",controls,sep="")),data=temp)
+
+printtable(regs,column.labels = c("Tax Rate","log(Listing price)","log(Selling price)","log(Purchase price)","Sale Month No"),note=note,lines="")
+
+```
+
+
+```{r}
+FL <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/list_data/FL_listing_data.rds")
+IL <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/list_data/IL_listing_data.rds")
+TX <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/list_data/TX_listing_data.rds")
+NY <- readRDS(file="C:/Users/dnratnadiwakara/Documents/sunkcost_2019/list_data/NY_listing_data.rds")
+keep_names <- names(FL)[names(FL) %in% names(IL) & names(FL) %in% names(TX)]
+IL <- subset(IL,select=keep_names)
+TX <- subset(TX,select=keep_names)
+NY <- subset(NY,select=keep_names)
+
+list_data <- rbind(IL,FL)
+list_data <- rbind(list_data,TX)
+list_data <- rbind(list_data,NY)
+rm(list=c("IL","TX","FL","NY"))
+list_data[,Bedrooms:=ifelse(is.na(list_data$Bedrooms),list_data$n_beds,list_data$Bedrooms)]
+list_data[,Bathrooms:=ifelse(is.na(list_data$Bathrooms),list_data$n_baths,list_data$Bathrooms)]
+list_data[,sqft:=ifelse(is.na(list_data$sqft),list_data$BuildingAreaSqFt,list_data$sqft)]
+```
+
+
+```{r}
+temp <- list_data[list_data$Purchase_year %in% 2009:2012 ]
+temp[,zip_purch_list:=paste(temp$zip,temp$Purchase_year)]
+temp <- temp[temp$Adj_purch_price>0]
+temp <- temp[temp$State %in% c("IL")]
+
+adj_list <- felm(log(list_price)~log(Adj_purch_price)|zip_purch_list,data=temp)
+adj_list_resid <- data.frame(adj_list$residuals)
+names(adj_list_resid) <- c("adj_list_resid")
+
+adj_purch <- felm(log(SalesPriceAmount)~log(HPI_purchase)+sqft|zip_purch_list,data=temp)
+adj_purch_resid <- data.frame(adj_purch$residuals)
+names(adj_purch_resid) <- c("adj_purch_resid")
+
+
+temp <- cbind(temp,adj_list_resid)
+temp <- cbind(temp,adj_purch_resid)
+temp[,purch_week:=as.numeric(strftime(temp$DocumentDate,format="%V"))-20]
+
+temp2 <- temp
+
+par(mfrow=c(2,3))
+# rdplot(temp$adj_purch_resid,temp$purch_week,p=0,c=0,x.label = "",title = "log(Purchase price)",y.label = "")
+rdplot(temp2$adj_list_resid,temp2$purch_week,p=0,c=0,x.label = "Purchased week (June 01 = 0)",title = "log(List price): IL",y.label = "")
+
+```
+```{r}
+temp <- list_data[list_data$Purchase_year %in% 2009:2012 ]
+temp[,zip_purch_list:=paste(temp$zip,temp$Purchase_year)]
+temp <- temp[temp$Adj_purch_price>0]
+temp <- temp[temp$State %in% c("NY")]
+
+adj_list <- felm(log(list_price)~log(Adj_purch_price)|zip_purch_list,data=temp)
+adj_list_resid <- data.frame(adj_list$residuals)
+names(adj_list_resid) <- c("adj_list_resid")
+
+adj_purch <- felm(log(SalesPriceAmount)~log(HPI_purchase)+sqft|zip_purch_list,data=temp)
+adj_purch_resid <- data.frame(adj_purch$residuals)
+names(adj_purch_resid) <- c("adj_purch_resid")
+
+
+temp <- cbind(temp,adj_list_resid)
+temp <- cbind(temp,adj_purch_resid)
+temp[,purch_week:=as.numeric(strftime(temp$DocumentDate,format="%V"))-20]
+
+temp3 <- temp
+par(mfrow=c(2,3))
+# rdplot(temp$adj_purch_resid,temp$purch_week,p=0,c=0,x.label = "",title = "log(Purchase price)",y.label = "")
+
+rdplot(temp3$adj_list_resid,temp3$purch_week,p=0,c=0,x.label = "Purchased week (June 01 = 0)",title = "log(List price): NY",y.label = "")
+```
+
+## Discontinuity around June 01 (ZTRAX DATA, California Sample)
+```{r}
+temp <- CA_all[CA_all$Purchase_year %in% 2009:2012 & CA_all$Sale_year>=2015 ]
+temp[,zip_purch_sale:=paste(temp$zip,temp$Sale_Purchase_year)]
+
+
+temp[,purch_month_no:=as.numeric(format(temp$Purchase_month,"%m"))]
+temp[,sale_month_no:=as.numeric(format(temp$Sale_date,"%m"))]
+# temp = temp[temp$purch_month_no %in% 2:8]
+temp <- temp[!is.na(temp$Adj_purch_price) & !is.na(temp$GEOID)]
+# temp[,Purchase_week:=temp$Purchase_week-1]
+
+
+adj_proptax <- felm(Tax_rate~log(HPI_purchase)|zip_purch_sale,data=temp)
+adj_proptax_resid <- data.frame(adj_proptax$residuals)
+names(adj_proptax_resid) <- c("adj_proptax_resid")
+
+adj_sale <- felm(log(Sale_price)~log(Adj_purch_price)|zip_purch_sale,data=temp)
+adj_sale_resid <- data.frame(adj_sale$residuals)
+names(adj_sale_resid) <- c("adj_sale_resid")
+
+
+adj_purch <- felm(log(Purchase_price)~log(HPI_purchase)+BuildingAreaSqFt|zip_purch_sale,data=temp)
+adj_purch_resid <- data.frame(adj_purch$residuals)
+names(adj_purch_resid) <- c("adj_purch_resid")
+
+adj_est <- felm(sale_month_no~1|zip_purch_sale,data=temp)
+adj_est_resid <- data.frame(adj_est$residuals)
+names(adj_est_resid) <- c("adj_est_resid")
+
+# 
+# adj_sqft <- felm(sqft~0|GEOID+purchase_list_year,data=temp)
+# adj_sqft_resid <- data.frame(adj_sqft$residuals)
+# names(adj_sqft_resid) <- c("adj_sqft_resid")
+
+# temp2 <- cbind(temp2,adj_proptax_resid)
+# temp <- cbind(temp,adj_list_resid)
+temp <- cbind(temp,adj_sale_resid)
+temp <- cbind(temp,adj_purch_resid)
+temp <- cbind(temp,adj_est_resid)
+# temp <- cbind(temp,adj_est_resid)
+# temp <- cbind(temp,adj_sqft_resid)
+
+# temp[,DocumentDate_prev:=as.Date(temp$DocumentDate_prev,origin = "1970-01-01")]
+# temp[,purch_week:=as.numeric(strftime(temp$DocumentDate_prev,format="%V"))+1]
+temp[,Purchase_week:=temp$Purchase_week-20]
+temp <- temp[temp$Purchase_week <= 30]
+p=0
+br=0
+# temp_1 <- temp[,.(adj_list_resid=mean(adj_list_resid)),by=list(purch_week)]
+par(mfrow=c(2,3))
+rdplot(temp$adj_sale_resid,temp$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Sale price)**",y.label = "")
+# rdplot(temp2$adj_proptax_resid,temp2$Purchase_week,p=1,c=20,x.label = "",title = "Tax Rate*",y.label = "")
+rdplot(temp$adj_purch_resid,temp$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Purchase price)*",y.label = "")
+rdplot(temp$adj_purch_resid,temp$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "Sale month",y.label = "")
+```
+
+
+
+## Discontinuity around June 01 (ZTRAX DATA, Non-California Sample)
+```{r}
+temp <- prev_trans[prev_trans$Purchase_year %in% 2009:2012 & prev_trans$Sale_year>=2015 ]
+temp[,zip_purch_sale:=paste(temp$zip,temp$Sale_Purchase_year)]
+temp <- temp[temp$State %in% c("17")]
+
+
+temp[,purch_month_no:=as.numeric(format(temp$Purchase_month,"%m"))]
+temp[,sale_month_no:=as.numeric(format(temp$Sale_date,"%m"))]
+# temp = temp[temp$purch_month_no %in% 2:8]
+temp <- temp[!is.na(temp$Adj_purch_price) & !is.na(temp$GEOID)]
+# temp[,Purchase_week:=temp$Purchase_week-1]
+
+
+adj_proptax <- felm(Tax_rate~log(HPI_purchase)|zip_purch_sale,data=temp)
+adj_proptax_resid <- data.frame(adj_proptax$residuals)
+names(adj_proptax_resid) <- c("adj_proptax_resid")
+
+adj_sale <- felm(log(Sale_price)~log(Adj_purch_price)|zip_purch_sale,data=temp)
+adj_sale_resid <- data.frame(adj_sale$residuals)
+names(adj_sale_resid) <- c("adj_sale_resid")
+
+
+adj_purch <- felm(log(Purchase_price)~log(HPI_purchase)+BuildingAreaSqFt|zip_purch_sale,data=temp)
+adj_purch_resid <- data.frame(adj_purch$residuals)
+names(adj_purch_resid) <- c("adj_purch_resid")
+
+adj_est <- felm(sale_month_no~1|zip_purch_sale,data=temp)
+adj_est_resid <- data.frame(adj_est$residuals)
+names(adj_est_resid) <- c("adj_est_resid")
+
+# 
+# adj_sqft <- felm(sqft~0|GEOID+purchase_list_year,data=temp)
+# adj_sqft_resid <- data.frame(adj_sqft$residuals)
+# names(adj_sqft_resid) <- c("adj_sqft_resid")
+
+# temp2 <- cbind(temp2,adj_proptax_resid)
+# temp <- cbind(temp,adj_list_resid)
+temp <- cbind(temp,adj_sale_resid)
+temp <- cbind(temp,adj_purch_resid)
+temp <- cbind(temp,adj_est_resid)
+# temp <- cbind(temp,adj_est_resid)
+# temp <- cbind(temp,adj_sqft_resid)
+
+# temp[,DocumentDate_prev:=as.Date(temp$DocumentDate_prev,origin = "1970-01-01")]
+# temp[,purch_week:=as.numeric(strftime(temp$DocumentDate_prev,format="%V"))+1]
+temp[,Purchase_week:=temp$Purchase_week-20]
+temp <- temp[temp$Purchase_week <= 30]
+
+temp4 <- temp
+p=0
+br=0
+# temp_1 <- temp[,.(adj_list_resid=mean(adj_list_resid)),by=list(purch_week)]
+par(mfrow=c(2,3))
+rdplot(temp4$adj_sale_resid,temp4$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Sale price): IL",y.label = "")
+# rdplot(temp2$adj_proptax_resid,temp2$Purchase_week,p=1,c=20,x.label = "",title = "Tax Rate*",y.label = "")
+# rdplot(temp$adj_purch_resid,temp$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Purchase price)*",y.label = "")
+# rdplot(temp$adj_purch_resid,temp$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "Sale month",y.label = "")
+```
+
+```{r}
+temp <- prev_trans[prev_trans$Purchase_year %in% 2009:2012 & prev_trans$Sale_year>=2015 ]
+temp[,zip_purch_sale:=paste(temp$zip,temp$Sale_Purchase_year)]
+temp <- temp[temp$State %in% c("36")]
+
+
+temp[,purch_month_no:=as.numeric(format(temp$Purchase_month,"%m"))]
+temp[,sale_month_no:=as.numeric(format(temp$Sale_date,"%m"))]
+# temp = temp[temp$purch_month_no %in% 2:8]
+temp <- temp[!is.na(temp$Adj_purch_price) & !is.na(temp$GEOID)]
+# temp[,Purchase_week:=temp$Purchase_week-1]
+
+
+adj_proptax <- felm(Tax_rate~log(HPI_purchase)|zip_purch_sale,data=temp)
+adj_proptax_resid <- data.frame(adj_proptax$residuals)
+names(adj_proptax_resid) <- c("adj_proptax_resid")
+
+adj_sale <- felm(log(Sale_price)~log(Adj_purch_price)|zip_purch_sale,data=temp)
+adj_sale_resid <- data.frame(adj_sale$residuals)
+names(adj_sale_resid) <- c("adj_sale_resid")
+
+
+adj_purch <- felm(log(Purchase_price)~log(HPI_purchase)+BuildingAreaSqFt|zip_purch_sale,data=temp)
+adj_purch_resid <- data.frame(adj_purch$residuals)
+names(adj_purch_resid) <- c("adj_purch_resid")
+
+adj_est <- felm(sale_month_no~1|zip_purch_sale,data=temp)
+adj_est_resid <- data.frame(adj_est$residuals)
+names(adj_est_resid) <- c("adj_est_resid")
+
+# 
+# adj_sqft <- felm(sqft~0|GEOID+purchase_list_year,data=temp)
+# adj_sqft_resid <- data.frame(adj_sqft$residuals)
+# names(adj_sqft_resid) <- c("adj_sqft_resid")
+
+# temp2 <- cbind(temp2,adj_proptax_resid)
+# temp <- cbind(temp,adj_list_resid)
+temp <- cbind(temp,adj_sale_resid)
+temp <- cbind(temp,adj_purch_resid)
+temp <- cbind(temp,adj_est_resid)
+# temp <- cbind(temp,adj_est_resid)
+# temp <- cbind(temp,adj_sqft_resid)
+
+# temp[,DocumentDate_prev:=as.Date(temp$DocumentDate_prev,origin = "1970-01-01")]
+# temp[,purch_week:=as.numeric(strftime(temp$DocumentDate_prev,format="%V"))+1]
+temp[,Purchase_week:=temp$Purchase_week-20]
+temp <- temp[temp$Purchase_week <= 30]
+
+temp5 <- temp
+p=0
+br=0
+# temp_1 <- temp[,.(adj_list_resid=mean(adj_list_resid)),by=list(purch_week)]
+par(mfrow=c(2,3))
+rdplot(temp5$adj_sale_resid,temp5$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Sale price): NY",y.label = "")
+# rdplot(temp2$adj_proptax_resid,temp2$Purchase_week,p=1,c=20,x.label = "",title = "Tax Rate*",y.label = "")
+# rdplot(temp$adj_purch_resid,temp$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Purchase price)*",y.label = "")
+# rdplot(temp$adj_purch_resid,temp$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "Sale month",y.label = "")
+```
+```{r}
+par(mfrow=c(2,2))
+rdplot(temp2$adj_list_resid,temp2$purch_week,p=0,c=0,x.label = "",title = "log(Listing price): IL",y.label = "")
+rdplot(temp3$adj_list_resid,temp3$purch_week,p=0,c=0,x.label = "",title = "log(Listing price): NY",y.label = "")
+rdplot(temp4$adj_sale_resid,temp4$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Selling price): IL",y.label = "")
+rdplot(temp5$adj_sale_resid,temp5$Purchase_week,p=p,c=br,x.label = "Purchased week (June 01=0)",title = "log(Selling price): NY",y.label = "")
+```
+
