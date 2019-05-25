@@ -261,7 +261,7 @@ removeNABlank <- function(df) {
   
   
   
-  historical_asmt <- readRDS(file=paste(path,"Historical/",state,"ZAsmt/main.rds",sep=""))
+  historical_asmt <- readRDS(file=paste(path,"Historical/",state,"main.rds",sep=""))
   historical_asmt <- historical_asmt[historical_asmt$ImportParcelID %in% unique(zillow_ztrax$ImportParcelID),]
   historical_asmt <- historical_asmt[,c("ImportParcelID","TaxAmount","TaxYear")]
   historical_asmt <- historical_asmt[!is.na(historical_asmt$TaxAmount)]
